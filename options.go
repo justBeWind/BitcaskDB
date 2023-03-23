@@ -16,6 +16,13 @@ type Options struct {
 	IndexType IndexerType
 }
 
+type IteratorOptions struct {
+	//遍历前缀为指定值的key，默认为空
+	Prefix []byte
+	//是否反向遍历，默认false是正向
+	Reverse bool
+}
+
 type IndexerType = int8
 
 const (
@@ -31,4 +38,9 @@ var DefaultOptions = Options{
 	DataFileSize: 256 * 1024 * 1024, // 256MB
 	SyncWrites:   false,
 	IndexType:    BTree,
+}
+
+var DefaultIteratorOptions = IteratorOptions{
+	Prefix:  nil,
+	Reverse: false,
 }
