@@ -1,4 +1,4 @@
-package bitcask_go
+package main
 
 import "os"
 
@@ -16,11 +16,21 @@ type Options struct {
 	IndexType IndexerType
 }
 
+// IteratorOptions 索引迭代器配置项
 type IteratorOptions struct {
-	//遍历前缀为指定值的key，默认为空
+	// 遍历前缀为指定值的 Key，默认为空
 	Prefix []byte
-	//是否反向遍历，默认false是正向
+	// 是否反向遍历，默认 false 是正向
 	Reverse bool
+}
+
+// WriteBatchOptions 批量写配置项
+type WriteBatchOptions struct {
+	//一个批次当中最大的数据量
+	MaxBatchNum uint
+
+	//提交时是否持久化
+	SyncWrites bool
 }
 
 type IndexerType = int8
@@ -43,4 +53,9 @@ var DefaultOptions = Options{
 var DefaultIteratorOptions = IteratorOptions{
 	Prefix:  nil,
 	Reverse: false,
+}
+
+var DefaultWriteBatchOptions = WriteBatchOptions{
+	MaxBatchNum: 10000,
+	SyncWrites:  true,
 }

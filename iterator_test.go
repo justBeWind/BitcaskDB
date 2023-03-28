@@ -1,4 +1,4 @@
-package bitcask_go
+package main
 
 import (
 	"bitcask-go/utils"
