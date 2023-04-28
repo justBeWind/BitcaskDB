@@ -12,7 +12,7 @@ type Options struct {
 	// 每次写数据是否持久化
 	SyncWrites bool
 
-	//累计写到多少字节后进行持久化
+	// 累计写到多少字节后进行持久化
 	BytesPerSync uint
 
 	// 索引类型
@@ -20,6 +20,9 @@ type Options struct {
 
 	// 启动时是否使用 MMap 加载数据
 	MMapAtStartup bool
+
+	//	数据文件合并的阈值
+	DataFileMergeRatio float32
 }
 
 // IteratorOptions 索引迭代器配置项
@@ -32,10 +35,10 @@ type IteratorOptions struct {
 
 // WriteBatchOptions 批量写配置项
 type WriteBatchOptions struct {
-	//一个批次当中最大的数据量
+	// 一个批次当中最大的数据量
 	MaxBatchNum uint
 
-	//提交时是否持久化
+	// 提交时是否 sync 持久化
 	SyncWrites bool
 }
 
@@ -48,17 +51,18 @@ const (
 	// ART Adpative Radix Tree 自适应基数树索引
 	ART
 
-	// BPlusTree B+树索引，将索引存储到磁盘上
+	// BPlusTree B+ 树索引，将索引存储到磁盘上
 	BPlusTree
 )
 
 var DefaultOptions = Options{
-	DirPath:       os.TempDir(),
-	DataFileSize:  256 * 1024 * 1024, // 256MB
-	SyncWrites:    false,
-	BytesPerSync:  0,
-	IndexType:     BTree,
-	MMapAtStartup: true,
+	DirPath:            os.TempDir(),
+	DataFileSize:       256 * 1024 * 1024, // 256MB
+	SyncWrites:         false,
+	BytesPerSync:       0,
+	IndexType:          BTree,
+	MMapAtStartup:      true,
+	DataFileMergeRatio: 0.5,
 }
 
 var DefaultIteratorOptions = IteratorOptions{

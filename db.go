@@ -4,6 +4,7 @@ import (
 	"bitcask-go/data"
 	"bitcask-go/fio"
 	"bitcask-go/index"
+	"bitcask-go/utils"
 	"errors"
 	"fmt"
 	"github.com/gofrs/flock"
@@ -29,12 +30,21 @@ type DB struct {
 	activeFile      *data.DataFile            // 当前活跃数据文件，可以用于写入
 	olderFiles      map[uint32]*data.DataFile // 旧的数据文件，只能用于读
 	index           index.Indexer             // 内存索引
-	seqNo           uint64                    //事务序列号，全局递增
-	isMerging       bool                      //是否存在merge
-	seqNoFileExists bool                      //存储事务序列号的文件是否存在
-	isInitial       bool                      //是否第一次初始化此数据目录
-	fileLock        *flock.Flock              //文件锁保证进程之间互斥
-	bytesWrite      uint                      //累计写了多少字节
+	seqNo           uint64                    // 事务序列号，全局递增
+	isMerging       bool                      // 是否正在 merge
+	seqNoFileExists bool                      // 存储事务序列号的文件是否存在
+	isInitial       bool                      // 是否是第一次初始化此数据目录
+	fileLock        *flock.Flock              // 文件锁保证多进程之间的互斥
+	bytesWrite      uint                      // 累计写了多少个字节
+	reclaimSize     int64                     // 表示有多少数据是无效的
+}
+
+// Stat 存储引擎统计信息
+type Stat struct {
+	KeyNum          uint  // key 的总数量
+	DataFileNum     uint  // 数据文件的数量
+	ReclaimableSize int64 // 可以进行 merge 回收的数据量，字节为单位
+	DiskSize        int64 // 数据目录所占磁盘空间大小
 }
 
 // Open 打开 bitcask 存储引擎实例
@@ -43,6 +53,7 @@ func Open(options Options) (*DB, error) {
 	if err := checkOptions(options); err != nil {
 		return nil, err
 	}
+
 	var isInitial bool
 	// 判断数据目录是否存在，如果不存在的话，则创建这个目录
 	if _, err := os.Stat(options.DirPath); os.IsNotExist(err) {
@@ -52,9 +63,8 @@ func Open(options Options) (*DB, error) {
 		}
 	}
 
-	//判断当前数据目录是否正在使用
+	// 判断当前数据目录是否正在使用
 	fileLock := flock.New(filepath.Join(options.DirPath, fileLockName))
-
 	hold, err := fileLock.TryLock()
 	if err != nil {
 		return nil, err
@@ -81,7 +91,7 @@ func Open(options Options) (*DB, error) {
 		fileLock:   fileLock,
 	}
 
-	//加载 merge 数据目录
+	// 加载 merge 数据目录
 	if err := db.loadMergeFiles(); err != nil {
 		return nil, err
 	}
@@ -105,7 +115,6 @@ func Open(options Options) (*DB, error) {
 
 		// 重置 IO 类型为标准文件 IO
 		if db.options.MMapAtStartup {
-			//这里只有它来加速读
 			if err := db.resetIoType(); err != nil {
 				return nil, err
 			}
@@ -136,24 +145,22 @@ func (db *DB) Close() error {
 			panic(fmt.Sprintf("failed to unlock the directory, %v", err))
 		}
 	}()
-
 	if db.activeFile == nil {
 		return nil
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	//关闭索引
+	// 关闭索引
 	if err := db.index.Close(); err != nil {
 		return err
 	}
 
-	//保存当前事务序列号
+	// 保存当前事务序列号
 	seqNoFile, err := data.OpenSeqNoFile(db.options.DirPath)
 	if err != nil {
 		return err
 	}
-
 	record := &data.LogRecord{
 		Key:   []byte(seqNoKey),
 		Value: []byte(strconv.FormatUint(db.seqNo, 10)),
@@ -162,7 +169,6 @@ func (db *DB) Close() error {
 	if err := seqNoFile.Write(encRecord); err != nil {
 		return err
 	}
-
 	if err := seqNoFile.Sync(); err != nil {
 		return err
 	}
@@ -190,6 +196,28 @@ func (db *DB) Sync() error {
 	return db.activeFile.Sync()
 }
 
+// Stat 返回数据库的相关统计信息
+func (db *DB) Stat() *Stat {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	var dataFiles = uint(len(db.olderFiles))
+	if db.activeFile != nil {
+		dataFiles += 1
+	}
+
+	dirSize, err := utils.DirSize(db.options.DirPath)
+	if err != nil {
+		panic(fmt.Sprintf("failed to get dir size : %v", err))
+	}
+	return &Stat{
+		KeyNum:          uint(db.index.Size()),
+		DataFileNum:     dataFiles,
+		ReclaimableSize: db.reclaimSize,
+		DiskSize:        dirSize,
+	}
+}
+
 // Put 写入 Key/Value 数据，key 不能为空
 func (db *DB) Put(key []byte, value []byte) error {
 	// 判断 key 是否有效
@@ -211,8 +239,8 @@ func (db *DB) Put(key []byte, value []byte) error {
 	}
 
 	// 更新内存索引
-	if ok := db.index.Put(key, pos); !ok {
-		return ErrIndexUpdateFailed
+	if oldPos := db.index.Put(key, pos); oldPos != nil {
+		db.reclaimSize += int64(oldPos.Size)
 	}
 
 	return nil
@@ -236,15 +264,19 @@ func (db *DB) Delete(key []byte) error {
 		Type: data.LogRecordDeleted,
 	}
 	// 写入到数据文件当中
-	_, err := db.appendLogRecordWithLock(logRecord)
+	pos, err := db.appendLogRecordWithLock(logRecord)
 	if err != nil {
 		return nil
 	}
+	db.reclaimSize += int64(pos.Size)
 
 	//	从内存索引中将对应的 key 删除
-	ok := db.index.Delete(key)
+	oldPos, ok := db.index.Delete(key)
 	if !ok {
 		return ErrIndexUpdateFailed
+	}
+	if oldPos != nil {
+		db.reclaimSize += int64(oldPos.Size)
 	}
 	return nil
 }
@@ -265,14 +297,15 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	if logRecordPos == nil {
 		return nil, ErrKeyNotFound
 	}
-	//从数据文件中获取value
-	return db.getValueByPosition(logRecordPos)
 
+	// 从数据文件中获取 value
+	return db.getValueByPosition(logRecordPos)
 }
 
-// ListKeys 获取数据库中所有的key
+// ListKeys 获取数据库中所有的 key
 func (db *DB) ListKeys() [][]byte {
 	iterator := db.index.Iterator(false)
+	defer iterator.Close()
 	keys := make([][]byte, db.index.Size())
 	var idx int
 	for iterator.Rewind(); iterator.Valid(); iterator.Next() {
@@ -282,7 +315,7 @@ func (db *DB) ListKeys() [][]byte {
 	return keys
 }
 
-// Fold 获取所有的数据，并执行用户指定的操作，函数返回false时终止遍历
+// Fold 获取所有的数据，并执行用户指定的操作，函数返回 false 时终止遍历
 func (db *DB) Fold(fn func(key []byte, value []byte) bool) error {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -301,7 +334,7 @@ func (db *DB) Fold(fn func(key []byte, value []byte) bool) error {
 	return nil
 }
 
-// 根据索引信息获取对应的value
+// 根据索引信息获取对应的 value
 func (db *DB) getValueByPosition(logRecordPos *data.LogRecordPos) ([]byte, error) {
 	// 根据文件 id 找到对应的数据文件
 	var dataFile *data.DataFile
@@ -336,7 +369,6 @@ func (db *DB) appendLogRecordWithLock(logRecord *data.LogRecord) (*data.LogRecor
 
 // 追加写数据到活跃文件中
 func (db *DB) appendLogRecord(logRecord *data.LogRecord) (*data.LogRecordPos, error) {
-
 	// 判断当前活跃数据文件是否存在，因为数据库在没有写入的时候是没有文件生成的
 	// 如果为空则初始化数据文件
 	if db.activeFile == nil {
@@ -378,14 +410,14 @@ func (db *DB) appendLogRecord(logRecord *data.LogRecord) (*data.LogRecordPos, er
 		if err := db.activeFile.Sync(); err != nil {
 			return nil, err
 		}
-		//清空累计值
+		// 清空累计值
 		if db.bytesWrite > 0 {
 			db.bytesWrite = 0
 		}
 	}
 
 	// 构造内存索引信息
-	pos := &data.LogRecordPos{Fid: db.activeFile.FileId, Offset: writeOff}
+	pos := &data.LogRecordPos{Fid: db.activeFile.FileId, Offset: writeOff, Size: uint32(size)}
 	return pos, nil
 }
 
@@ -457,10 +489,10 @@ func (db *DB) loadIndexFromDataFiles() error {
 		return nil
 	}
 
-	//查看是否发生过merge，发生过就说明已经从merge中加载过 一部分索引，要避免重复加载
+	// 查看是否发生过 merge
 	hasMerge, nonMergeFileId := false, uint32(0)
-	mergeFileName := filepath.Join(db.options.DirPath, data.MergeFinishedFileName)
-	if _, err := os.Stat(mergeFileName); err == nil {
+	mergeFinFileName := filepath.Join(db.options.DirPath, data.MergeFinishedFileName)
+	if _, err := os.Stat(mergeFinFileName); err == nil {
 		fid, err := db.getNonMergeFileId(db.options.DirPath)
 		if err != nil {
 			return err
@@ -470,25 +502,26 @@ func (db *DB) loadIndexFromDataFiles() error {
 	}
 
 	updateIndex := func(key []byte, typ data.LogRecordType, pos *data.LogRecordPos) {
-		var ok bool
+		var oldPos *data.LogRecordPos
 		if typ == data.LogRecordDeleted {
-			ok = db.index.Delete(key)
+			oldPos, _ = db.index.Delete(key)
+			db.reclaimSize += int64(pos.Size)
 		} else {
-			ok = db.index.Put(key, pos)
+			oldPos = db.index.Put(key, pos)
 		}
-		if !ok {
-			panic("failed to update index at startup")
+		if oldPos != nil {
+			db.reclaimSize += int64(oldPos.Size)
 		}
 	}
 
-	//暂存事务数据
+	// 暂存事务数据
 	transactionRecords := make(map[uint64][]*data.TransactionRecord)
-	var currentSeqNo uint64 = nonTransactionSeqNo
+	var currentSeqNo = nonTransactionSeqNo
 
 	// 遍历所有的文件id，处理文件中的记录
 	for i, fid := range db.fileIds {
 		var fileId = uint32(fid)
-		//如果比最近未参与merge的文件id更小，则说明已经从Hint文件中加载索引了
+		// 如果比最近未参与 merge 的文件 id 更小，则说明已经从 Hint 文件中加载索引了
 		if hasMerge && fileId < nonMergeFileId {
 			continue
 		}
@@ -510,23 +543,21 @@ func (db *DB) loadIndexFromDataFiles() error {
 			}
 
 			// 构造内存索引并保存
-			logRecordPos := &data.LogRecordPos{Fid: fileId, Offset: offset}
+			logRecordPos := &data.LogRecordPos{Fid: fileId, Offset: offset, Size: uint32(size)}
 
-			//解析key，拿到事务序列号
+			// 解析 key，拿到事务序列号
 			realKey, seqNo := parseLogRecordKey(logRecord.Key)
 			if seqNo == nonTransactionSeqNo {
-				//非事务操作，直接更新索引
+				// 非事务操作，直接更新内存索引
 				updateIndex(realKey, logRecord.Type, logRecordPos)
 			} else {
-				//事务操作，即WriteBatch的提交
-				//如果事务已经完成提交，即数据是有效的，那么对应的seqNo的数据
+				// 事务完成，对应的 seq no 的数据可以更新到内存索引中
 				if logRecord.Type == data.LogRecordTxnFinished {
 					for _, txnRecord := range transactionRecords[seqNo] {
 						updateIndex(txnRecord.Record.Key, txnRecord.Record.Type, txnRecord.Pos)
 					}
 					delete(transactionRecords, seqNo)
 				} else {
-					//继续暂存
 					logRecord.Key = realKey
 					transactionRecords[seqNo] = append(transactionRecords[seqNo], &data.TransactionRecord{
 						Record: logRecord,
@@ -535,7 +566,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 				}
 			}
 
-			//更新序列号
+			// 更新事务序列号
 			if seqNo > currentSeqNo {
 				currentSeqNo = seqNo
 			}
@@ -550,7 +581,7 @@ func (db *DB) loadIndexFromDataFiles() error {
 		}
 	}
 
-	//更新数据库中的事务序列号
+	// 更新事务序列号
 	db.seqNo = currentSeqNo
 	return nil
 }
@@ -562,6 +593,9 @@ func checkOptions(options Options) error {
 	if options.DataFileSize <= 0 {
 		return errors.New("database data file size must be greater than 0")
 	}
+	if options.DataFileMergeRatio < 0 || options.DataFileMergeRatio > 1 {
+		return errors.New("invalid merge ratio, must between 0 and 1")
+	}
 	return nil
 }
 
@@ -570,6 +604,7 @@ func (db *DB) loadSeqNo() error {
 	if _, err := os.Stat(fileName); os.IsNotExist(err) {
 		return nil
 	}
+
 	seqNoFile, err := data.OpenSeqNoFile(db.options.DirPath)
 	if err != nil {
 		return err
@@ -579,9 +614,9 @@ func (db *DB) loadSeqNo() error {
 	if err != nil {
 		return err
 	}
-
 	db.seqNo = seqNo
 	db.seqNoFileExists = true
+
 	return os.Remove(fileName)
 }
 
