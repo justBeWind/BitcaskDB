@@ -7,7 +7,6 @@ import (
 	"bitcask-go/utils"
 	"errors"
 	"fmt"
-	"github.com/gofrs/flock"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/gofrs/flock"
 )
 
 const (
@@ -218,6 +219,13 @@ func (db *DB) Stat() *Stat {
 		ReclaimableSize: db.reclaimSize,
 		DiskSize:        dirSize,
 	}
+}
+
+// 备份数据库，将数据文件拷贝到新的目录
+func (db *DB) Backup(dir string) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return utils.CoypDir(db.options.DirPath, dir, []string{fileLockName})
 }
 
 // Put 写入 Key/Value 数据，key 不能为空
