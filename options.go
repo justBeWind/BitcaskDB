@@ -1,7 +1,5 @@
 package main
 
-import "os"
-
 type Options struct {
 	// 数据库数据目录
 	DirPath string
@@ -56,8 +54,8 @@ const (
 )
 
 var DefaultOptions = Options{
-	DirPath:            os.TempDir(),
-	DataFileSize:       256 * 1024 * 1024, // 256MB
+	DirPath:            ".\\C:\\Users\\1\\AppData\\Local\\Temp\\", //E:\KV_Projects\temp  os.TempDir()
+	DataFileSize:       256 * 1024 * 1024,                         // 256MB
 	SyncWrites:         false,
 	BytesPerSync:       0,
 	IndexType:          BTree,

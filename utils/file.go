@@ -24,7 +24,7 @@ func DirSize(dirPath string) (int64, error) {
 
 // AvailableDiskSize 获取磁盘剩余可用空间大小
 func AvailableDiskSize() (uint64, error) {
-	wd, err := syscall.Getwd() //wd是当前文件的绝对路径
+	wd, err := syscall.Getwd()
 	if err != nil {
 		return 0, err
 	}
@@ -33,14 +33,4 @@ func AvailableDiskSize() (uint64, error) {
 		return 0, err
 	}
 	return stat.Bavail * uint64(stat.Bsize), nil
-	//h := syscall.MustLoadDLL("kernel32.dll")
-	//c := h.MustFindProc("GetDiskFreeSpaceExW")
-	//lpFreeBytesAvailable := int64(0)
-	//lpTotalNumberOfBytes := int64(0)
-	//lpTotalNumberOfFreeBytes := int64(0)
-	//c.Call(uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(wd))),
-	//	uintptr(unsafe.Pointer(&lpFreeBytesAvailable)),
-	//	uintptr(unsafe.Pointer(&lpTotalNumberOfBytes)),
-	//	uintptr(unsafe.Pointer(&lpTotalNumberOfFreeBytes)))
-	//return uint64(lpTotalNumberOfFreeBytes), nil
 }

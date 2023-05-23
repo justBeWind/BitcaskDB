@@ -51,6 +51,7 @@ type Stat struct {
 func Open(options Options) (*DB, error) {
 	// 对用户传入的配置项进行校验
 	if err := checkOptions(options); err != nil {
+		print("54")
 		return nil, err
 	}
 
@@ -58,6 +59,7 @@ func Open(options Options) (*DB, error) {
 	// 判断数据目录是否存在，如果不存在的话，则创建这个目录
 	if _, err := os.Stat(options.DirPath); os.IsNotExist(err) {
 		isInitial = true
+		print("62")
 		if err := os.MkdirAll(options.DirPath, os.ModePerm); err != nil {
 			return nil, err
 		}

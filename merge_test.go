@@ -14,11 +14,13 @@ func TestDB_Merge(t *testing.T) {
 	dir, _ := os.MkdirTemp("", "bitcask-go-merge-1")
 	opts.DirPath = dir
 	db, err := Open(opts)
+	t.Log("0000", db)
 	defer destroyDB(db)
 	assert.Nil(t, err)
 	assert.NotNil(t, db)
-
+	t.Log("111111111", db)
 	err = db.Merge()
+	t.Log("TestDB_Merge", err)
 	assert.Nil(t, err)
 }
 

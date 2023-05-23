@@ -103,6 +103,8 @@ func (db *DB) Merge() error {
 		return err
 	}
 
+	defer mergeDB.Close()
+
 	// 打开 hint 文件存储索引
 	hintFile, err := data.OpenHintFile(mergePath)
 	if err != nil {
