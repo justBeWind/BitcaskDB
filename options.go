@@ -1,4 +1,4 @@
-package main
+package bitcask_go
 
 type Options struct {
 	// 数据库数据目录
